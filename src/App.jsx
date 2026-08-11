@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Navbar from './components/Navbar';
 import PendingOrdersTab from './components/PendingOrdersTab';
 import WAParserTab from './components/WAParserTab';
@@ -11,130 +11,114 @@ import PrintReceipt from './components/PrintReceipt';
 import CustomerOrderModal from './components/CustomerOrderModal';
 
 import {
-  getStoredProducts,
-  saveProducts,
-  getStoredTransactions,
-  saveTransactions,
-  getStoredSettings,
-  saveSettings,
-  getStoredPendingOrders,
-  savePendingOrders
-} from './utils/storage';
+  subscribeProducts,
+  subscribeTransactions,
+  subscribePendingOrders,
+  subscribeSettings,
+  saveProductToCloud,
+  deleteProductFromCloud,
+  addTransactionToCloud,
+  addPendingOrderToCloud,
+  removePendingOrderFromCloud,
+  saveSettingsToCloud
+} from './services/firebaseService';
+
 import { INITIAL_PRODUCTS, DEFAULT_STORE_SETTINGS } from './data/initialData';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('pending');
-  const [products, setProducts] = useState(getStoredProducts);
-  const [transactions, setTransactions] = useState(getStoredTransactions);
-  const [storeSettings, setStoreSettings] = useState(getStoredSettings);
-
-  // Initial seed pending order for testing if empty
-  const [pendingOrders, setPendingOrders] = useState(() => {
-    const stored = getStoredPendingOrders();
-    if (stored.length === 0) {
-      const initialSeed = [
-        {
-          id: `WA-${Date.now().toString().slice(-6)}`,
-          date: new Date().toISOString(),
-          customerName: "Mas Dion (Pembeli WA)",
-          customerPhone: "0812-9876-5432",
-          address: "Jl. Melati No. 8, Kebayoran",
-          notes: "Kopi susu aren nya 1 less ice ya kak",
-          paymentMethod: "Transfer BCA / QRIS",
-          items: [
-            { productId: "PROD-001", name: "Kopi Susu Aren", price: 18000, qty: 2, subtotal: 36000, unit: "cup" },
-            { productId: "PROD-004", name: "Roti Bakar Cokelat Keju", price: 20000, qty: 1, subtotal: 20000, unit: "porsi" }
-          ],
-          subtotal: 56000,
-          shippingFee: 10000,
-          discount: 0,
-          total: 66000,
-          channel: "WhatsApp",
-          status: "pending_review"
-        }
-      ];
-      savePendingOrders(initialSeed);
-      return initialSeed;
-    }
-    return stored;
-  });
+  const [products, setProducts] = useState(INITIAL_PRODUCTS);
+  const [transactions, setTransactions] = useState([]);
+  const [pendingOrders, setPendingOrders] = useState([]);
+  const [storeSettings, setStoreSettings] = useState(DEFAULT_STORE_SETTINGS);
 
   const [currentReceipt, setCurrentReceipt] = useState(null);
   const [showCustomerModal, setShowCustomerModal] = useState(false);
+  const [isFirebaseConnected, setIsFirebaseConnected] = useState(true);
 
-  // Storage Sync Helpers
-  const updateProducts = (newProducts) => {
+  // Subscribe to Firebase Cloud Firestore Real-time Listeners
+  useEffect(() => {
+    const unsubProducts = subscribeProducts((data) => {
+      setProducts(data);
+      setIsFirebaseConnected(true);
+    }, () => setIsFirebaseConnected(false));
+
+    const unsubTransactions = subscribeTransactions((data) => {
+      setTransactions(data);
+    });
+
+    const unsubPending = subscribePendingOrders((data) => {
+      setPendingOrders(data);
+    });
+
+    const unsubSettings = subscribeSettings((data) => {
+      setStoreSettings(data);
+    });
+
+    return () => {
+      unsubProducts();
+      unsubTransactions();
+      unsubPending();
+      unsubSettings();
+    };
+  }, []);
+
+  // Handlers linked directly to Cloud Firestore
+  const handleSaveProducts = async (newProducts) => {
     setProducts(newProducts);
-    saveProducts(newProducts);
+    for (const prod of newProducts) {
+      await saveProductToCloud(prod);
+    }
   };
 
-  const updateTransactions = (newTransactions) => {
-    setTransactions(newTransactions);
-    saveTransactions(newTransactions);
-  };
-
-  const updateSettings = (newSettings) => {
+  const handleSaveSettings = async (newSettings) => {
     setStoreSettings(newSettings);
-    saveSettings(newSettings);
+    await saveSettingsToCloud(newSettings);
   };
 
-  const updatePendingOrders = (newOrders) => {
-    setPendingOrders(newOrders);
-    savePendingOrders(newOrders);
+  const handleResetAllData = async () => {
+    for (const prod of INITIAL_PRODUCTS) {
+      await saveProductToCloud(prod);
+    }
+    await saveSettingsToCloud(DEFAULT_STORE_SETTINGS);
   };
 
-  const handleResetAllData = () => {
-    setProducts(INITIAL_PRODUCTS);
-    saveProducts(INITIAL_PRODUCTS);
-    setTransactions([]);
-    saveTransactions([]);
-    setPendingOrders([]);
-    savePendingOrders([]);
-    setStoreSettings(DEFAULT_STORE_SETTINGS);
-    saveSettings(DEFAULT_STORE_SETTINGS);
-  };
-
-  // Add new order sent by buyer
-  const handleAddPendingOrder = (newOrder) => {
-    const updated = [newOrder, ...pendingOrders];
-    updatePendingOrders(updated);
+  // Buyer Action: Send Order to Cloud Firebase
+  const handleAddPendingOrder = async (newOrder) => {
+    await addPendingOrderToCloud(newOrder);
   };
 
   // Seller Action: Confirm Pending WA Order & Print Receipt
-  const handleConfirmPendingOrder = (pendingOrder) => {
-    // 1. Deduct Inventory Stock
-    const updatedProducts = products.map(product => {
-      const purchasedItem = pendingOrder.items.find(item => item.productId === product.id);
-      if (purchasedItem) {
-        const newStock = Math.max(0, product.stock - purchasedItem.qty);
-        return { ...product, stock: newStock };
+  const handleConfirmPendingOrder = async (pendingOrder) => {
+    // 1. Deduct Inventory Stock in Firebase Cloud
+    for (const item of pendingOrder.items) {
+      const product = products.find(p => p.id === item.productId);
+      if (product) {
+        const newStock = Math.max(0, product.stock - item.qty);
+        await saveProductToCloud({ ...product, stock: newStock });
       }
-      return product;
-    });
-    updateProducts(updatedProducts);
+    }
 
-    // 2. Save to Transactions History
+    // 2. Save Transaction to Cloud
     const transaction = {
       ...pendingOrder,
       channel: 'WhatsApp'
     };
-    updateTransactions([transaction, ...transactions]);
+    await addTransactionToCloud(transaction);
 
-    // 3. Remove from Pending Orders Queue
-    const updatedPending = pendingOrders.filter(o => o.id !== pendingOrder.id);
-    updatePendingOrders(updatedPending);
+    // 3. Remove from Cloud Pending Orders
+    await removePendingOrderFromCloud(pendingOrder.id);
 
-    // 4. Open Receipt Modal for Thermal Printing & Copy Text
+    // 4. Open Thermal Receipt Modal
     setCurrentReceipt(transaction);
   };
 
-  const handleRejectPendingOrder = (orderId) => {
-    const updated = pendingOrders.filter(o => o.id !== orderId);
-    updatePendingOrders(updated);
+  const handleRejectPendingOrder = async (orderId) => {
+    await removePendingOrderFromCloud(orderId);
   };
 
-  // Simulate incoming buyer WhatsApp order for test
-  const handleSimulateNewOrder = () => {
+  // Simulate incoming buyer WhatsApp order directly to Cloud
+  const handleSimulateNewOrder = async () => {
     const sampleNames = ["Kak Fitri", "Mas Rendy", "Bpk Hariyanto", "Siska (Kantor Melati)"];
     const randomName = sampleNames[Math.floor(Math.random() * sampleNames.length)];
     const randomProduct1 = products[0] || INITIAL_PRODUCTS[0];
@@ -160,23 +144,21 @@ export default function App() {
       status: "pending_review"
     };
 
-    handleAddPendingOrder(newSimulatedOrder);
+    await addPendingOrderToCloud(newSimulatedOrder);
     setActiveTab('pending');
   };
 
-  // Direct manual receipt checkout
-  const handleProcessReceipt = (transaction) => {
-    const updatedProducts = products.map(product => {
-      const purchasedItem = transaction.items.find(item => item.productId === product.id);
-      if (purchasedItem) {
-        const newStock = Math.max(0, product.stock - purchasedItem.qty);
-        return { ...product, stock: newStock };
+  // Direct POS receipt checkout
+  const handleProcessReceipt = async (transaction) => {
+    for (const item of transaction.items) {
+      const product = products.find(p => p.id === item.productId);
+      if (product) {
+        const newStock = Math.max(0, product.stock - item.qty);
+        await saveProductToCloud({ ...product, stock: newStock });
       }
-      return product;
-    });
-    updateProducts(updatedProducts);
+    }
 
-    updateTransactions([transaction, ...transactions]);
+    await addTransactionToCloud(transaction);
     setCurrentReceipt(transaction);
   };
 
@@ -237,7 +219,7 @@ export default function App() {
         {activeTab === 'inventory' && (
           <InventoryTab
             products={products}
-            onSaveProducts={updateProducts}
+            onSaveProducts={handleSaveProducts}
           />
         )}
 
@@ -245,14 +227,14 @@ export default function App() {
           <HistoryTab
             transactions={transactions}
             onReprint={handleReprintReceipt}
-            onClearHistory={() => updateTransactions([])}
+            onClearHistory={() => {}}
           />
         )}
 
         {activeTab === 'settings' && (
           <SettingsTab
             storeSettings={storeSettings}
-            onSaveSettings={updateSettings}
+            onSaveSettings={handleSaveSettings}
             onResetData={handleResetAllData}
           />
         )}
